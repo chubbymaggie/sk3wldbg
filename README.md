@@ -27,12 +27,12 @@ have a 32-bit build of the Unicorn library for your IDA platform (Windows,
 Linux, OS X).
 
 The plugin is currently based on a patched branch of the Unicorn Engine, available
-here: https://github.com/cseagle/Unicorn/tree/no-thread
+here: https://github.com/cseagle/Unicorn/tree/ram_addr
 
 ```
 git clone https://github.com/cseagle/Unicorn.git
-cd Unicorn
-git checkout no-thread
+cd unicorn
+git checkout ram_addr
 ```
 
 On all platforms you should clone sk3wldbg into your IDA SDK plugins directory so 
@@ -79,7 +79,24 @@ care of if you build Unicorn from source.
 As an alternative to building the plugin yourself, pre-built binaries for 
 IDA 6.9 (Windows, Linux, OS X), including 32-bit versions of the Unicorn 
 library are available in the bin directory. Install these per the instructions
-above
+above. Pleasae note that the Unicorn library depends on glib-2.0 and libintl.
+For Linux users, make sure the 32-bit versions of these libraries are installed 
+using your package manager. For OS X users, these libraries may be installed 
+with brew or macports. Windows users will need libglib-2.0-0.dll, libintl-8.dll,
+libgcc_s_dw2-1.dll, and any other required libraries from Mingw or cygwin
+installed into their IDA directory or in a system search path. To install using
+msys2/cygwin:
+
+Msys2:
+
+    $ pacman -S make
+    $ pacman -S pkg-config
+    $ pacman -S mingw-w64-i686-glib2
+    $ pacman -S mingw-w64-i686-toolchain
+
+Cygwin:
+
+    $ apt-cyg install make gcc-core pkg-config libpcre-devel zlib-devel libglib2.0-devel
 
 ## USING THE PLUGIN
 
