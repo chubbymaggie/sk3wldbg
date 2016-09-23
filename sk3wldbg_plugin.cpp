@@ -56,6 +56,46 @@
 #include "sk3wldbg_ppc.h"
 #include "sk3wldbg_m68k.h"
 
+static bool hooked = false;
+
+static mem_map_action_handler mem_map_handler;
+
+static action_desc_t mem_map_action = {
+   sizeof(action_desc_t),
+   "sk3wldbg:mem_map",
+   "Map memory...",
+   &mem_map_handler,
+   NULL,
+   NULL,
+   NULL,
+   0
+};
+
+static bool registered = false;
+
+static int idaapi ui_hook(void *user_data, int notification_code, va_list va) {
+   switch (notification_code) {
+      case ui_debugger_menu_change: {
+         bool enable = va_arg(va, int) != 0;
+         msg("ui_debugger_menu_change received, enable = %u\n", enable);
+/*
+         if (enable) {
+            register_action(mem_map_action);
+            attach_action_to_menu("Debugger/Take memory snapshot", "sk3wldbg:mem_map", SETMENU_APP);
+            registered = true;
+         }
+         else if (registered) {
+            detach_action_from_menu("Debugger/Take memory snapshot", "sk3wldbg:mem_map");
+            unregister_action("sk3wldbg:mem_map");            
+            registered = false;
+         }
+*/
+         return 1;
+      }
+   }
+   return 0;
+}
+
 //--------------------------------------------------------------------------
 //
 //      Initialize.
@@ -82,6 +122,7 @@ int idaapi plugin_init(void) {
       debug_mode = UC_MODE_32;
    }
    else {
+      msg("sk3wldbg: can't detect file bitness\n");
       return PLUGIN_SKIP;
    }
    switch (ph.id) {
@@ -129,8 +170,13 @@ int idaapi plugin_init(void) {
          }
          break;
       default:
+         msg("sk3wldbg: unsupported processor\n");
          return PLUGIN_SKIP;
    }
+//   hook_to_notification_point(::HT_UI, ui_hook, dbg);
+//   hooked = true;
+   register_action(mem_map_action);
+   registered = true;
    msg(PLUGIN_NAME" keeping sk3wldbg\n");
    return PLUGIN_KEEP;
 }
@@ -141,10 +187,25 @@ int idaapi plugin_init(void) {
 //      IDA will call this function when the user asks to exit.
 //      This function won't be called in the case of emergency exits.
 
+#ifndef DEBUG
+#define DEBUG
+#endif
+
 void idaapi plugin_term(void) {
 #ifdef DEBUG
    msg(PLUGIN_NAME": term entered\n");
 #endif
+
+   if (hooked) {
+      unhook_from_notification_point(::HT_UI, ui_hook);
+      hooked = false;
+   }
+   if (registered) {
+      //This call is currently causing IDA to crash so something is 
+      //not being done correctly.
+      //Wrong place to unregister? Wrong thread to unregister from?
+//      unregister_action("sk3wldbg:mem_map");            
+   }
 
 #ifdef DEBUG
    msg(PLUGIN_NAME": term exiting\n");

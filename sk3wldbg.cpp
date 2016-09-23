@@ -79,15 +79,23 @@ static unsigned int uc_to_ida_perms_map[] = {
    SEGPERM_EXEC, SEGPERM_EXEC | SEGPERM_READ, SEGPERM_EXEC | SEGPERM_WRITE, SEGPERM_EXEC | SEGPERM_WRITE | SEGPERM_WRITE
 };
 
+struct safe_msg : public exec_request_t {
+   const char *the_msg;
+   safe_msg(const char *msg) : the_msg(msg) {};
+   int idaapi execute(void);
+};
+
+int idaapi safe_msg::execute() {
+   msg(the_msg);
+   return 0;
+}
+
 /// Initialize debugger.
 /// This function is called from the main thread.
 /// \return success
 bool idaapi uni_init_debugger(const char * /*hostname*/, int /*portnum*/, const char * /*password*/) {
    sk3wldbg *uc = (sk3wldbg*)dbg;
    msg("uni_init_debugger called\n");
-//   bool result = uc->open();
-   msg("uni_init_debugger complete\n");
-//   return result;
    return true;
 }
 
@@ -97,16 +105,26 @@ bool idaapi uni_init_debugger(const char * /*hostname*/, int /*portnum*/, const 
 bool idaapi uni_term_debugger(void) {
    sk3wldbg *uc = (sk3wldbg*)dbg;
    msg("uni_term_debugger called\n");
+//   safe_msg req("uni_term_debugger called\n");
+//   execute_sync(req, MFF_FAST);
    if (uc->uc) {
       uc_emu_stop(uc->uc);
       uc->emu_state = RS_TERM;
       qsem_post(uc->run_sem);
       //***synchronize here to make sure execution thread has stopped
       qthread_join(uc->process_thread);
-      msg("uni_term_debugger thread joined\n");
+//      msg("uni_term_debugger thread joined\n");
       uc->close();
+
+      if (uc->registered_menu) {
+         detach_action_from_menu("Debugger/Take memory snapshot", "sk3wldbg:mem_map");
+//         unregister_action("sk3wldbg:mem_map");
+         uc->registered_menu = false;
+      }
+//      uc->uc = NULL;
    }
-   msg("uni_term_debugger complete\n");
+//   safe_msg req2("uni_term_debugger complete\n");
+//   execute_sync(req2, MFF_FAST);
    return true;
 }
 
@@ -116,7 +134,7 @@ bool sk3wldbg::queue_exception_event(uint32_t code, uint64_t mem_addr, const cha
    exc.pid = the_process;
    exc.tid = the_threads.front();
    exc.ea = (ea_t)get_pc();
-   msg("Exception occurred at: 0x%llx\n", (uint64_t)exc.ea);
+//   msg("Exception occurred at: 0x%llx\n", (uint64_t)exc.ea);
    exc.handled = true;
    exc.exc.code = code;
    exc.exc.can_cont = false;
@@ -140,6 +158,17 @@ bool sk3wldbg::queue_dbg_event(bool is_hardware) {
    return true;
 }
 
+struct print_pc : public exec_request_t {
+   uint64_t pc;
+   print_pc(uint64_t _pc) : pc(_pc) {};
+   int idaapi execute(void);
+};
+
+int idaapi print_pc::execute() {
+   msg("processRunner running from 0x%llx\n", (uint64_t)pc);
+   return 0;
+}
+
 int idaapi processRunner(void *unicorn) {
    sk3wldbg *uc = (sk3wldbg*)unicorn;
    //this is going to have to run in a separate thread otherwise other
@@ -149,6 +178,8 @@ int idaapi processRunner(void *unicorn) {
       qsem_wait(uc->run_sem, -1);
       //pick this up every time we start in case user changed the PC manually
       uint64_t _pc = uc->get_pc();
+//      print_pc req(_pc);
+//      execute_sync(req, MFF_FAST);
       switch (uc->emu_state) {
          case RS_INIT:
             break;
@@ -158,15 +189,12 @@ int idaapi processRunner(void *unicorn) {
          case RS_PAUSE:
             break;
          case RS_STEP_INTO:
-//            msg("processRunner RS_STEP_INTO\n");
             uc->step(_pc);
             break;
          case RS_STEP_OVER:
-//            msg("processRunner RS_STEP_OVER\n");
             uc->step(_pc);
             break;
          case RS_STEP_OUT:
-//            msg("processRunner RS_STEP_OUT\n");
             uc->step(_pc);
             break;
          case RS_TERM:
@@ -187,11 +215,24 @@ int idaapi uni_process_get_info(int n, process_info_t *info) {
    if (n) {
       return 0;
    }
-   msg("uni_process_get_info called\n");
+//   msg("uni_process_get_info called\n");
    sk3wldbg *uc = (sk3wldbg*)dbg;
    qstrncpy(info->name, "Unicorn Process", sizeof(info->name));
    info->pid = uc->the_process;
    return 1;
+}
+
+struct install_menu : public exec_request_t {
+   sk3wldbg *uc;
+   install_menu(sk3wldbg *_uc) : uc(_uc) {};
+   int idaapi execute(void);
+};
+
+int idaapi install_menu::execute() {
+   attach_action_to_menu("Debugger/Take memory snapshot", "sk3wldbg:mem_map", SETMENU_APP);
+   enable_menu_item("Debugger/Map memory...", false);
+   uc->registered_menu = true;
+   return 0;
 }
 
 /// Start an executable to debug.
@@ -210,15 +251,18 @@ int idaapi uni_process_get_info(int n, process_info_t *info) {
 /// \retval  1 | #CRC32_MISMATCH  ok, but the input file crc does not match
 /// \retval -1                    network error
 int idaapi uni_start_process(const char * /*path*/,
-                  const char * /*args*/,
+                  const char *args,
                   const char * /*startdir*/,
                   int /*dbg_proc_flags*/,
                   const char *input_path,
                   uint32 /*input_file_crc32*/) {
 
-   msg("uni_start_process called\n");
+//   msg("uni_start_process called\n");
    sk3wldbg *uc = (sk3wldbg*)dbg;
 
+   install_menu req(uc);
+   execute_sync(req, MFF_FAST);
+   
    ea_t init_pc = get_screen_ea();
 
    uc->check_mode(init_pc);
@@ -228,7 +272,17 @@ int idaapi uni_start_process(const char * /*path*/,
       return 0;
    }
 
+#ifdef DEBUG
+   ea_t ipc= (ea_t)uc->get_pc();
+   msg("Initial unicorn pc is: 0x%llx\n", (uint64_t)ipc);   
+#endif
+
+   qsem_free(uc->run_sem);
+   uc->run_sem = qsem_create(NULL, 0);
+   qmutex_unlock(uc->evt_mutex);
    uc->clear_memory();
+   uc->dbg_evt_list.clear();
+   uc->the_threads.clear();
 
    uc->getRandomBytes(&uc->the_process, 2);
    uc->the_process = (uc->the_process % 40000) + 1000;
@@ -263,7 +317,7 @@ int idaapi uni_start_process(const char * /*path*/,
                msg("fread fail\n");
             }
             else {
-               loaded = loadImage(uc, img, sz);
+               loaded = loadImage(uc, img, sz, args);
             }
             free(img);
          }
@@ -278,7 +332,7 @@ int idaapi uni_start_process(const char * /*path*/,
       //architecture dependent since each arch has its own SP register
       //arch specific unicorns also need to set initial register state
       segment_t *seg;
-      msg("uni_start_process copying memory called\n");
+//      msg("uni_start_process copying memory called\n");
       for (seg = get_first_seg(); seg != NULL; seg = get_next_seg(seg->startEA)) {
          uint64_t exact = seg->endEA - seg->startEA;
 
@@ -298,7 +352,7 @@ int idaapi uni_start_process(const char * /*path*/,
       //need a stack too, just sling it somewhere
       //add it to uc->memory
       unsigned int stack_top = 0xc0000000;
-      uc->map_mem_zero(stack_top - 0x100000, stack_top, UC_PROT_READ | UC_PROT_WRITE);
+      uc->map_mem_zero(stack_top - 0x100000, stack_top, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
       stack_top -= 16;
       uc->set_sp(stack_top);
    }
@@ -309,7 +363,12 @@ int idaapi uni_start_process(const char * /*path*/,
    //need other ways to set PC, from start, user specified
    uc->set_pc(init_pc);
 
-   uc->emu_state = RS_INIT;
+#ifdef DEBUG
+   ipc = (ea_t)uc->get_pc();
+   msg("After set_pc, unicorn pc is: 0x%llx\n", (uint64_t)ipc);   
+#endif
+
+   uc->emu_state = RS_RUN;
    //this is going to have to run in a separate thread otherwise other
    //debthread functions will never get called
    uc->process_thread = qthread_create(processRunner, uc);
@@ -331,7 +390,7 @@ int idaapi uni_start_process(const char * /*path*/,
    start.modinfo.rebase_to = BADADDR;
    uc->enqueue_debug_evt(start);
 
-   msg("uni_start_process complete\n");
+//   msg("uni_start_process complete\n");
    return 1;
 }
 
@@ -343,7 +402,7 @@ int idaapi uni_start_process(const char * /*path*/,
 /// \retval -1  network error
 int idaapi uni_attach_process(pid_t /*pid*/, int /*event_id*/, int /*dbg_proc_flags*/) {
    //can't do this with unicorn
-   msg("uni_attach_process called\n");
+//   msg("uni_attach_process called\n");
    return 0;
 }
 
@@ -357,7 +416,7 @@ int idaapi uni_attach_process(pid_t /*pid*/, int /*event_id*/, int /*dbg_proc_fl
 /// \retval  0  failed
 /// \retval -1  network error
 int idaapi uni_detach_process(void) {
-   msg("uni_detach_process called\n");
+//   msg("uni_detach_process called\n");
    //for unicorn we will just terminate session if user wants to detach
    sk3wldbg *uc = (sk3wldbg*)dbg;
    uc_emu_stop(uc->uc);
@@ -365,7 +424,7 @@ int idaapi uni_detach_process(void) {
    qsem_post(uc->run_sem);
    //***synchronize here to make sure execution thread has stopped
    qthread_join(uc->process_thread);
-   msg("uni_detach_process thread joined\n");
+//   msg("uni_detach_process thread joined\n");
 
    debug_event_t detach;
    detach.eid = PROCESS_DETACH;
@@ -375,7 +434,7 @@ int idaapi uni_detach_process(void) {
    detach.handled = true;
    uc->enqueue_debug_evt(detach);
 
-   msg("uni_detach_process complete\n");
+//   msg("uni_detach_process complete\n");
 
    return 1;
 }
@@ -383,7 +442,7 @@ int idaapi uni_detach_process(void) {
 /// Rebase database if the debugged program has been rebased by the system.
 /// This function is called from the main thread.
 void idaapi uni_rebase_if_required_to(ea_t /*new_base*/) {
-   msg("uni_rebase_if_required_to called: NOT IMPLEMENTED\n");
+//   msg("uni_rebase_if_required_to called: NOT IMPLEMENTED\n");
 }
 
 /// Prepare to pause the process.
@@ -398,7 +457,7 @@ void idaapi uni_rebase_if_required_to(ea_t /*new_base*/) {
 /// \retval -1  network error
 int idaapi uni_prepare_to_pause_process(void) {
    sk3wldbg *uc = (sk3wldbg*)dbg;
-   msg("uni_prepare_to_pause_process called\n");
+//   msg("uni_prepare_to_pause_process called\n");
    uc->pause();
    debug_event_t pause;
    pause.eid = ::PROCESS_SUSPEND;
@@ -407,7 +466,7 @@ int idaapi uni_prepare_to_pause_process(void) {
    pause.ea = inf.minEA;
    pause.info[0] = 0;
    uc->enqueue_debug_evt(pause);
-   msg("uni_prepare_to_pause_process complete\n");
+//   msg("uni_prepare_to_pause_process complete\n");
    return 1;
 }
 
@@ -422,14 +481,14 @@ int idaapi uni_prepare_to_pause_process(void) {
 /// \retval -1  network error
 int idaapi uni_exit_process(void) {
    sk3wldbg *uc = (sk3wldbg*)dbg;
-   msg("uni_exit_process called\n");
+//   msg("uni_exit_process called\n");
 
    uc_emu_stop(uc->uc);
    uc->emu_state = RS_TERM;
    qsem_post(uc->run_sem);
    //***synchronize here to make sure execution thread has stopped
    qthread_join(uc->process_thread);
-   msg("uni_exit_process thread joined\n");
+//   msg("uni_exit_process thread joined\n");
 
    debug_event_t stop;
    stop.eid = ::PROCESS_EXIT;
@@ -456,7 +515,7 @@ gdecode_t idaapi uni_get_debug_event(debug_event_t *event, int /*timeout_ms*/) {
    }
    else {
       uc->dequeue_debug_evt(event);
-      msg("uni_get_debug_event called returning: eid = 0x%08x\n", event->eid);
+//      msg("uni_get_debug_event called returning: eid = 0x%08x\n", event->eid);
       //should we ever act on event->eid here?
       return uc->debug_queue_len() > 0 ? GDE_MANY_EVENTS : GDE_ONE_EVENT;
    }
@@ -469,34 +528,36 @@ gdecode_t idaapi uni_get_debug_event(debug_event_t *event, int /*timeout_ms*/) {
 /// \retval -1  network error
 int idaapi uni_continue_after_event(const debug_event_t *event) {
    sk3wldbg *uc = (sk3wldbg*)dbg;
-   msg("uni_continue_after_event called: eid = 0x%08x\n", event->eid);
+//   msg("uni_continue_after_event called: eid = 0x%08x\n", event->eid);
    if (event == NULL || event->eid == 2) {// || uc->dbg_evt_list.size() == 0) {
       return 1;
    }
    switch (event->eid) {
       case PROCESS_START:
-         msg("uni_continue_after_event resuming execution\n");
-         uc->emu_state = RS_RUN;
+//         msg("uni_continue_after_event resuming execution\n");
+//         uc->emu_state = RS_RUN;
          qsem_post(uc->run_sem);
          break;
       case PROCESS_EXIT:
-         msg("uni_continue_after_event PROCESS_EXIT\n");
+//         msg("uni_continue_after_event PROCESS_EXIT\n");
          uc->emu_state = RS_TERM;
          qsem_post(uc->run_sem);
          break;
       case THREAD_START:
-         msg("uni_continue_after_event THREAD_START\n");
+//         msg("uni_continue_after_event THREAD_START\n");
+         qsem_post(uc->run_sem);
          break;
       case THREAD_EXIT:
-         msg("uni_continue_after_event THREAD_EXIT\n");
+//         msg("uni_continue_after_event THREAD_EXIT\n");
+         qsem_post(uc->run_sem);
          break;
       case BREAKPOINT:
-         msg("uni_continue_after_event BREAKPOINT\n");
+//         msg("uni_continue_after_event BREAKPOINT\n");
          //resume from breakpoint, replace instruction in memory, single step resume again?
          qsem_post(uc->run_sem);
          break;
       case STEP:
-         msg("uni_continue_after_event trying to step\n");
+//         msg("uni_continue_after_event trying to step\n");
          //state should have been set in set_resume_mode
          qsem_post(uc->run_sem);
 /*
@@ -514,36 +575,40 @@ int idaapi uni_continue_after_event(const debug_event_t *event) {
 */
          break;
       case EXCEPTION:
-         msg("uni_continue_after_event EXCEPTION\n");
+//         msg("uni_continue_after_event EXCEPTION\n");
          //give it a try
          qsem_post(uc->run_sem);
          break;
       case LIBRARY_LOAD:
-         msg("uni_continue_after_event LIBRARY_LOAD\n");
+//         msg("uni_continue_after_event LIBRARY_LOAD\n");
+         qsem_post(uc->run_sem);
          break;
       case LIBRARY_UNLOAD:
-         msg("uni_continue_after_event LIBRARY_UNLOAD\n");
+//         msg("uni_continue_after_event LIBRARY_UNLOAD\n");
+         qsem_post(uc->run_sem);
          break;
       case INFORMATION:
-         msg("uni_continue_after_event INFORMATION\n");
+//         msg("uni_continue_after_event INFORMATION\n");
          break;
       case SYSCALL:
-         msg("uni_continue_after_event SYSCALL\n");
+//         msg("uni_continue_after_event SYSCALL\n");
+         qsem_post(uc->run_sem);
          break;
       case WINMESSAGE:
-         msg("uni_continue_after_event WINMESSAGE\n");
+//         msg("uni_continue_after_event WINMESSAGE\n");
          break;
       case PROCESS_ATTACH:
-         msg("uni_continue_after_event PRICESS_ATTACH\n");
+//         msg("uni_continue_after_event PRICESS_ATTACH\n");
          break;
       case PROCESS_DETACH:
-         msg("uni_continue_after_event PROCESS_DETACH\n");
+//         msg("uni_continue_after_event PROCESS_DETACH\n");
          break;
       case PROCESS_SUSPEND:
-         msg("uni_continue_after_event PROCESS_SUSPEND\n");
+//         msg("uni_continue_after_event PROCESS_SUSPEND\n");
+         qsem_post(uc->run_sem);
          break;
       case TRACE_FULL:
-         msg("uni_continue_after_event TRACE_FULL\n");
+//         msg("uni_continue_after_event TRACE_FULL\n");
          break;
       case NO_EVENT:
          break;
@@ -554,7 +619,7 @@ int idaapi uni_continue_after_event(const debug_event_t *event) {
 /// Set exception handling.
 /// This function is called from debthread or the main thread.
 void idaapi uni_set_exception_info(const exception_info_t *info, int qty) {
-   msg("uni_set_exception_info called\n");
+//   msg("uni_set_exception_info called\n");
    for (int i = 0; i < qty; i++) {
       msg("Exception #%d\n", i);
       msg("   Code: 0x%x, flags: 0x%x\n", info[i].code, info[i].flags);
@@ -588,7 +653,7 @@ void idaapi uni_stopped_at_debug_event(bool /*dlls_added*/) {
 /// \retval -1  network error
 int idaapi uni_thread_suspend(thid_t /*tid*/) { ///< Suspend a running thread
    sk3wldbg *uc = (sk3wldbg*)dbg;
-   msg("uni_thread_suspend called\n");
+//   msg("uni_thread_suspend called\n");
    uc->pause();
    uc->do_suspend = true;
    return 1;
@@ -608,7 +673,7 @@ int idaapi uni_thread_continue(thid_t /*tid*/) { ///< Resume a suspended thread
 
 int idaapi uni_set_resume_mode(thid_t /*tid*/, resume_mode_t resmod) { ///< Specify resume action
    sk3wldbg *uc = (sk3wldbg*)dbg;
-   msg("uni_set_resume_mode called. resmod = %d\n", resmod);
+//   msg("uni_set_resume_mode called. resmod = %d\n", resmod);
    //*** figure out how best to handle all resume modes
    switch (resmod) {
       case RESMOD_OVER:
@@ -639,7 +704,7 @@ int idaapi uni_set_resume_mode(thid_t /*tid*/, resume_mode_t resmod) { ///< Spec
 /// \retval  0  failed
 /// \retval -1  network error
 int idaapi uni_read_registers(thid_t /*tid*/, int clsmask, regval_t *values) {
-   msg("uni_read_registers called\n");
+//   msg("uni_read_registers called\n");
    sk3wldbg *uc = (sk3wldbg*)dbg;
    uc_err err = UC_ERR_OK;
    //need to figure out how to do this across all unicorn archs
@@ -662,7 +727,7 @@ int idaapi uni_read_registers(thid_t /*tid*/, int clsmask, regval_t *values) {
 /// \retval  0  failed
 /// \retval -1  network error
 int idaapi uni_write_register(thid_t /*tid*/, int regidx, const regval_t *value) {
-   msg("uni_write_register called\n");
+//   msg("uni_write_register called\n");
    //need to figure out how to do this across all unicorn archs
    sk3wldbg *uc = (sk3wldbg*)dbg;
    uc_err err = uc_reg_write(uc->uc, uc->reg_map[regidx], &value->ival);
@@ -679,7 +744,7 @@ int idaapi uni_write_register(thid_t /*tid*/, int regidx, const regval_t *value)
 /// \retval  0  failed
 /// \retval -1  network error
 int idaapi uni_thread_get_sreg_base(thid_t /*tid*/, int /*sreg_value*/, ea_t *answer) {
-   msg("uni_thread_get_sreg_base called\n");
+//   msg("uni_thread_get_sreg_base called\n");
    //right now unicorn has no way to get this information since base is not a register
    //would need to read decide whether seg is local or global, then UC_X86_REG_L/GDTR,
    //the uc_read_mem to read correct descriptor, then parse out the base address
@@ -700,7 +765,7 @@ int idaapi uni_thread_get_sreg_base(thid_t /*tid*/, int /*sreg_value*/, ea_t *an
 /// \retval   1  new memory layout is returned
 int idaapi uni_get_memory_info(meminfo_vec_t &areas) {
    sk3wldbg *uc = (sk3wldbg*)dbg;
-   msg("uni_get_memory_info called\n");
+//   msg("uni_get_memory_info called\n");
    uc_mem_region *regions;
    uint32_t count;
    uc_err err = uc_mem_regions(uc->uc, &regions, &count);
@@ -753,7 +818,7 @@ ssize_t idaapi uni_write_memory(ea_t ea, const void *buffer, size_t size) {
 /// It is called to verify hardware breakpoints.
 /// \return ref BPT_
 int idaapi uni_is_ok_bpt(bpttype_t type, ea_t ea, int /*len*/) {
-   msg("uni_is_ok_bpt called for 0x%llx\n", (uint64_t)ea);
+//   msg("uni_is_ok_bpt called for 0x%llx\n", (uint64_t)ea);
    //*** test type and setup appropriate actions in hook functions to break
    //    when appropriate
    switch (type) {
@@ -776,7 +841,7 @@ int idaapi uni_is_ok_bpt(bpttype_t type, ea_t ea, int /*len*/) {
 /// This function is called from debthread.
 /// \return number of successfully modified bpts, -1 if network error
 int idaapi uni_update_bpts(update_bpt_info_t *bpts, int nadd, int ndel) {
-   msg("uni_update_bpts called\n");
+//   msg("uni_update_bpts called\n");
    int processed = 0;
    sk3wldbg *uc = (sk3wldbg*)dbg;
    for (int i = 0; i < nadd; i++) {
@@ -799,7 +864,7 @@ int idaapi uni_update_bpts(update_bpt_info_t *bpts, int nadd, int ndel) {
 /// This function is called from debthread.
 /// \return nlowcnds. -1-network error
 int idaapi uni_update_lowcnds(const lowcnd_t * /*lowcnds*/, int nlowcnds) {
-   msg("uni_update_lowcnds called\n");
+//   msg("uni_update_lowcnds called\n");
    warning("TITLE Under Construction\nICON INFO\nAUTOHIDE NONE\nHIDECANCEL\nConditional breakpoints are currently unimplemented");
    return nlowcnds;
 }
@@ -809,17 +874,17 @@ int idaapi uni_update_lowcnds(const lowcnd_t * /*lowcnds*/, int nlowcnds) {
 /// These functions are called from the main thread
 /// -1-error
 int idaapi uni_open_file(const char *file, uint32 * /*fsize*/, bool /*readonly*/) {
-   msg("uni_open_file called (%s)\n", file);
+//   msg("uni_open_file called (%s)\n", file);
    return -1;
 }
 
 void idaapi uni_close_file(int /*fn*/) {
-   msg("uni_close_file called\n");
+//   msg("uni_close_file called\n");
    return;
 }
 
 ssize_t idaapi uni_read_file(int /*fn*/, uint32 /*off*/, void * /*buf*/, size_t /*size*/) {
-   msg("uni_read_file called\n");
+//   msg("uni_read_file called\n");
    return -1;
 }
 
@@ -867,7 +932,7 @@ ea_t idaapi uni_map_address(ea_t off, const regval_t * /*regs*/, int /*regnum*/)
 // in IDA's Debugger setup dialog
 const char *idaapi uni_set_dbg_options(const char *keyword, int /*pri*/,
                                 int value_type, const void *value) {
-   msg("uni_set_dbg_options called: %s\n", keyword);
+//   msg("uni_set_dbg_options called: %s\n", keyword);
    if (value_type == IDPOPT_STR) {
       msg("   option value: %s\n", (char*)value);
    }
@@ -882,7 +947,7 @@ const char *idaapi uni_set_dbg_options(const char *keyword, int /*pri*/,
 /// extensions may be called from plugins.
 /// This function is called from the main thread.
 const void *idaapi uni_get_debmod_extensions(void) {
-   msg("uni_get_debmod_extensions called\n");
+//   msg("uni_get_debmod_extensions called\n");
    return NULL;
 }
 
@@ -894,7 +959,7 @@ const void *idaapi uni_get_debmod_extensions(void) {
 /// This function is called from the main thread.
 /// \return success
 bool idaapi uni_update_call_stack(thid_t /*tid*/, call_stack_t * /*trace*/) {
-   msg("uni_update_call_stack called\n");
+//   msg("uni_update_call_stack called\n");
    warning("TITLE Under Construction\nICON INFO\nAUTOHIDE NONE\nHIDECANCEL\nStack trace is currently unimplemented");
    return false;
 }
@@ -930,7 +995,7 @@ ea_t idaapi uni_appcall(
      debug_event_t * /*event*/,
      int /*options*/) {
 
-   msg("uni_appcall called\n");
+//   msg("uni_appcall called\n");
    warning("TITLE Under Construction\nICON INFO\nAUTOHIDE NONE\nHIDECANCEL\nappcall is currently unimplemented");
    return BADADDR;
 
@@ -1021,7 +1086,7 @@ ea_t idaapi uni_appcall(
 /// \retval  0  failed
 /// \retval -1  network error
 int idaapi uni_cleanup_appcall(thid_t /*tid*/) {
-   msg("uni_cleanup_appcall called\n");
+//   msg("uni_cleanup_appcall called\n");
    return 1;
 
 /*
@@ -1042,21 +1107,21 @@ int idaapi uni_cleanup_appcall(thid_t /*tid*/) {
 /// \retval  0  not satisfied
 /// \retval -1  network error
 int idaapi uni_eval_lowcnd(thid_t /*tid*/, ea_t ea) {
-   msg("uni_eval_lowcnd called: 0x%llx\n", (uint64_t)ea);
+//   msg("uni_eval_lowcnd called: 0x%llx\n", (uint64_t)ea);
 //   warning("TITLE Under Construction\nICON INFO\nAUTOHIDE NONE\nHIDECANCEL\nConditional breakpoints are currently unimplemented");
    return 1;
 }
 
 /// This function is called from main thread
 ssize_t idaapi uni_write_file(int /*fn*/, uint32 /*off*/, const void * /*buf*/, size_t /*size*/) {
-   msg("uni_write_file called\n");
+//   msg("uni_write_file called\n");
    return -1;
 }
 
 /// Perform a debugger-specific function.
 /// This function is called from debthread
 int idaapi uni_send_ioctl(int /*fn*/, const void * /*buf*/, size_t /*size*/, void ** /*poutbuf*/, ssize_t * /*poutsize*/) {
-   msg("uni_send_ioctl called\n");
+//   msg("uni_send_ioctl called\n");
    return -1;
 }
 
@@ -1065,7 +1130,7 @@ int idaapi uni_send_ioctl(int /*fn*/, const void * /*buf*/, size_t /*size*/, voi
 /// See thread_t::trace_mode in debugger.h.
 /// This function is called from the main thread.
 bool idaapi uni_dbg_enable_trace(thid_t /*tid*/, bool /*enable*/, int /*trace_flags*/) {
-   msg("uni_dbg_enable_trace called\n");
+//   msg("uni_dbg_enable_trace called\n");
    warning("TITLE Under Construction\nICON INFO\nAUTOHIDE NONE\nHIDECANCEL\naTracing is currently unimplemented");
    return false;
 }
@@ -1073,21 +1138,21 @@ bool idaapi uni_dbg_enable_trace(thid_t /*tid*/, bool /*enable*/, int /*trace_fl
 /// Is tracing enabled? ONLY used for tracers.
 /// "trace_bit" can be one of the following: STEP_TRACE, INSN_TRACE, BBLK_TRACE or FUNC_TRACE
 bool idaapi uni_is_tracing_enabled(thid_t /*tid*/, int /*tracebit*/) {
-   msg("uni_is_tracing_enabled called\n");
+//   msg("uni_is_tracing_enabled called\n");
    return false;
 }
 
 /// Execute a command on the remote computer.
 /// \return exit code
 int idaapi uni_rexec(const char *cmdline) {
-   msg("uni_rexec called (%s)\n", cmdline);
+//   msg("uni_rexec called (%s)\n", cmdline);
    return 0;
 }
 
 /// Get (store to out_pattrs) process/debugger-specific runtime attributes.
 /// This function is called from main thread.
 void idaapi uni_get_debapp_attrs(debapp_attrs_t *out_pattrs) {
-   msg("uni_get_debapp_attrs called\n");
+//   msg("uni_get_debapp_attrs called\n");
    out_pattrs->addrsize = (inf.lflags & LFLG_64BIT) ? 8 :4;
    if (inf.filetype == f_PE) {
       if (inf.lflags & LFLG_64BIT) {
@@ -1145,6 +1210,7 @@ sk3wldbg::sk3wldbg(const char *procname, uc_arch arch, uc_mode mode, const char 
    do_suspend = false;
    finished = false;
    single_step = false;
+   registered_menu = false;
    if (inf.mf) {
       debug_mode = (uc_mode)((int)UC_MODE_BIG_ENDIAN | (int)debug_mode);
    }
@@ -1226,7 +1292,7 @@ sk3wldbg::~sk3wldbg() {
 }
 
 void sk3wldbg::enqueue_debug_evt(debug_event_t &evt) {
-   msg("Queueing event eid = %d, ea = 0x%llx\n", evt.eid, (uint64_t)evt.ea);
+//   msg("Queueing event eid = %d, ea = 0x%llx\n", evt.eid, (uint64_t)evt.ea);
    qmutex_lock(evt_mutex);
    dbg_evt_list.push_back(evt);
    qmutex_unlock(evt_mutex);
@@ -1252,25 +1318,46 @@ void sk3wldbg::close() {
       uc_hook_del(uc, mem_fault_hook);
       mem_fault_hook = 0;
    }  
+
+   detach_action_from_menu("Debugger/Take memory snapshot", "sk3wldbg:mem_map");
+
+//   safe_msg req("sk3wldbg: closing unicorn instance\n");
+//   execute_sync(req, MFF_FAST);
+//   msg("sk3wldbg: closing unicorn instance\n");
    uc_close(uc);
 //   uc = NULL;
+}
+
+void sk3wldbg::runtime_exception(uc_err err, uint64_t pc) {
+   char msg[1024];
+   msg[0] = 0;
+   switch (err) {
+      case UC_ERR_READ_UNMAPPED:
+         qsnprintf(msg, sizeof(msg), "The instruction at 0x%llx attempted to read from unmapped memory", (uint64_t)pc);
+         break;
+      case UC_ERR_WRITE_UNMAPPED:
+         qsnprintf(msg, sizeof(msg), "The instruction at 0x%llx attempted to write to unmapped memory", (uint64_t)pc);
+         break;
+      case UC_ERR_FETCH_UNMAPPED:
+         qsnprintf(msg, sizeof(msg), "The instruction at 0x%llx attempted to execute from unmapped memory", (uint64_t)pc);
+         break;
+      case UC_ERR_WRITE_PROT:
+         qsnprintf(msg, sizeof(msg), "The instruction at 0x%llx attempted to write to write protected memory", (uint64_t)pc);
+         break;
+      case UC_ERR_READ_PROT:
+         qsnprintf(msg, sizeof(msg), "The instruction at 0x%llx attempted to read from read protected unmapped memory", (uint64_t)pc);
+         break;
+      case UC_ERR_FETCH_PROT:
+         qsnprintf(msg, sizeof(msg), "The instruction at 0x%llx attempted to fetch from NX memory", (uint64_t)pc);
+         break;
+   }
+   queue_exception_event(11, pc, msg);   
 }
 
 void sk3wldbg::start(uint64_t pc) {
    uc_err err = uc_emu_start(uc, pc, (uint64_t)-1, 0, 0);
    if (err != UC_ERR_OK) {
-      msg("start Failed on uc_emu_start(0x%llx) with error returned %u: %s\n", pc, err, uc_strerror(err));
-      debug_event_t exc;
-      exc.eid = ::EXCEPTION;
-      exc.pid = the_process;
-      exc.tid = the_threads.front();
-      exc.ea = (ea_t)get_pc();
-      exc.handled = false;
-      exc.exc.code = 11;
-      exc.exc.can_cont = false;
-      exc.exc.ea = BADADDR;
-      qstrncpy(exc.exc.info, uc_strerror(err), sizeof(exc.exc.info));
-      enqueue_debug_evt(exc);
+      runtime_exception(err, get_pc());
    }
    //hook functions should handle pausing emulator and inserting appropriate debugger events
 }
@@ -1286,11 +1373,9 @@ void sk3wldbg::resume() {
 }
 
 void sk3wldbg::step(uint64_t pc) {
-   msg("stepping from 0x%llx\n", pc);
    uc_err err = uc_emu_start(uc, pc, (uint64_t)-1, 0, 1);
-   msg("made it back from stepping from 0x%llx, err = %d\n", pc, err);
    if (err != UC_ERR_OK) {
-      msg("step Failed on uc_emu_start(0x%llx) with error returned %u: %s\n", pc, err, uc_strerror(err));
+      runtime_exception(err, get_pc());
    }
    else {
       emu_state = RS_RUN;
@@ -1330,7 +1415,7 @@ void sk3wldbg::map_mem_copy(uint64_t startAddr, uint64_t endAddr, unsigned int p
          msg("Failed on uc_mem_write() with error returned %u: %s\n", err, uc_strerror(err));
       }
    }
-   msg("map_mem_copy(0x%llx, 0x%llx, 0x%x) COMPLETE\n", startAddr, endAddr, perms);
+//   msg("map_mem_copy(0x%llx, 0x%llx, 0x%x) COMPLETE\n", startAddr, endAddr, perms);
 }
 
 void sk3wldbg::map_mem_zero(uint64_t startAddr, uint64_t endAddr, unsigned int perms) {
@@ -1342,7 +1427,7 @@ void sk3wldbg::map_mem_zero(uint64_t startAddr, uint64_t endAddr, unsigned int p
    if (err != UC_ERR_OK) {
       msg("Failed on uc_mem_map() with error returned %u: %s\n", err, uc_strerror(err));
    }
-   msg("map_mem_zero(0x%llx, 0x%llx, 0x%x) COMPLETE\n", startAddr, endAddr, perms);
+//   msg("map_mem_zero(0x%llx, 0x%llx, 0x%x) COMPLETE\n", startAddr, endAddr, perms);
 }
 
 void sk3wldbg::getRandomBytes(void *buf, unsigned int len) {
@@ -1360,12 +1445,12 @@ void sk3wldbg::getRandomBytes(void *buf, unsigned int len) {
 }
 
 void sk3wldbg::add_bpt(uint64_t bpt_addr) {
-   msg("add_bpt: 0x%llx\n", bpt_addr);
+//   msg("add_bpt: 0x%llx\n", bpt_addr);
    breakpoints.insert(bpt_addr);
 }
 
 void sk3wldbg::del_bpt(uint64_t bpt_addr) {
-   msg("del_bpt: 0x%llx\n", bpt_addr);
+//   msg("del_bpt: 0x%llx\n", bpt_addr);
    breakpoints.erase(bpt_addr);
 }
 
@@ -1423,6 +1508,7 @@ bool sk3wldbg::set_sp(uint64_t sp) {
    return false;
 }
 
+
 bool generic_mem_fault_hook(uc_engine *uc, uc_mem_type type, uint64_t address,
                             int /*size*/, int64_t value, sk3wldbg *dbg) {
    char msg[1024];
@@ -1467,11 +1553,13 @@ void sk3wldbg::install_initial_hooks() {
       code_hook = 0;
       msg("Failed on uc_hook_add(generic_code_hook) with error returned: %u\n", err);
    }
+/*
    err = uc_hook_add(uc, &mem_fault_hook, UC_HOOK_MEM_INVALID, (void*)generic_mem_fault_hook, this, 1, 0);
    if (err) {
       mem_fault_hook = 0;
       msg("Failed on uc_hook_add(generic_mem_fault_hook) with error returned: %u\n", err);
    }
+*/
 }
 
 bool sk3wldbg::read_register(int regidx, regval_t *value) {
@@ -1508,4 +1596,33 @@ bool sk3wldbg::restore_registers() {
    qfree(saved);
    saved = NULL;
    return true;
+}
+
+//return non-zero to have ida refresh all windows
+int idaapi mem_map_action_handler::activate(action_activation_ctx_t *ctx) {
+   uint64_t base = 0;
+   uint64_t size = 0x1000;
+   uint16_t perms = 3;
+   int ok;
+   sk3wldbg *uc = (sk3wldbg*)dbg;
+//   msg("mem_map_action_handler activated\n");
+   ok = AskUsingForm_c("Map Memory Region\n\n\n<Start address:L:18:20::>\n<Region size  :L:18:20::><Read:C>\n<Write:C>\n<Exec:C>>\n", &base, &size, &perms);
+   if (ok) {
+      if (base & 0xfff) {
+         warning("AUTOHIDE NONE\nHIDECANCEL\nRegion base address must be page aligned");
+      }
+      else if (size & 0xfff) {
+         warning("AUTOHIDE NONE\nHIDECANCEL\nRegion size must be page aligned");
+      }
+      else {
+         //we need to make sure that unicorn is paused when we do this
+//         uc_err err = uc_mem_map(uc->uc, base, (size_t)size, perms);
+      }
+   }
+   return 0;
+}
+
+action_state_t idaapi mem_map_action_handler::update(action_update_ctx_t *ctx) {
+//   msg("mem_map_action_handler::update called\n");
+   return AST_ENABLE_ALWAYS;
 }

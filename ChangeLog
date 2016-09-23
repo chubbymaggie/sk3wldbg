@@ -1,3 +1,16 @@
+* 9/6/16
+  Build minimal ELF environment in elf stacks
+  Improve stability wrt debugger term/restart, and closing databases/ida
+  Better state reset between debugging sessions 
+* 9/5/16
+  Make menu installation thread safe
+  Map stacks as RWX until we allow user's to choose X vs NX, for ELF defer to PT_GNU_STACK if present
+  Correctly handle endian-ness in ELF headers
+* 6/6/16
+  Sync to latest Unicorn
+  Don't call ANY IDA functions from Unicorn thread!
+* 5/31/16
+  Change binary name to sk3wldbg_user because IDA wants an _ in debugger names
 * 4/26/16
   Initial efforts to handle memory access errors
   Updated binaries
